@@ -5,7 +5,10 @@ use crate::models::{CreateUser, LoginRequest, LoginResponse, UpdateUser};
 use crate::db;
 use crate::token::TokenService;
 use bcrypt::verify;
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
+use futures::future::try_join_all;
+use std::time::Duration;
+use tokio::time::timeout;
 
 pub async fn login(pool: web::Data<Pool<Mssql>>, cfg: web::Data<crate::config::Settings>, body: web::Json<LoginRequest>) -> impl Responder {
     match db::find_by_username(&pool, &body.username).await {
@@ -72,12 +75,47 @@ pub async fn delete_user(pool: web::Data<Pool<Mssql>>, path: web::Path<i32>) -> 
 }
 
 // Example endpoint demonstrating concurrent data load using join_all (Promise.all equivalent)
-pub async fn load_concurrent(pool: web::Data<Pool<Mssql>>) -> impl Responder {
+pub async fn load_concurrent(pool: web::Data<Pool<Mssql>>, cfg: web::Data<crate::config::Settings>) -> impl Responder {
     // For demo, we will fetch the list of users and then fetch each user individually concurrently
     match db::list_users(&pool).await {
         Ok(users) => {
-            let futures = users.iter().map(|u| db::get_user(&pool, u.id));
-            let results: Vec<_> = join_all(futures).await;
+            let concurrency_limit = cfg.concurrency_limit;
+            let timeout_secs = cfg.db_query_timeout_secs;
+            let fail_fast = cfg.fail_fast;
+
+            // Build a vector of futures where each db::get_user is wrapped with a timeout
+            let futures_vec = users.into_iter().map(|u| {
+                let pool = pool.clone();
+                async move {
+                    // apply per-query timeout
+                    let fut = db::get_user(&pool, u.id);
+                    match timeout(Duration::from_secs(timeout_secs), fut).await {
+                        Ok(inner_res) => inner_res, // Result<Option<User>, sqlx::Error>
+                            Err(_) => Err(anyhow::anyhow!("timeout")),
+                    }
+                }
+            }).collect::<Vec<_>>();
+
+            // If fail_fast is desired, use try_join_all which returns Err on first Err.
+            if fail_fast {
+                match try_join_all(futures_vec).await {
+                    Ok(results) => {
+                        let mut out = Vec::new();
+                        for r in results {
+                            if let Some(u) = r {
+                                out.push(u);
+                            }
+                        }
+                        return HttpResponse::Ok().json(out);
+                    }
+                    Err(e) => return HttpResponse::InternalServerError().body(format!("Err: {}", e)),
+                }
+            }
+
+            // Otherwise run with limited concurrency using buffer_unordered
+            let stream = stream::iter(futures_vec.into_iter().map(|fut| async { fut.await }));
+            let results: Vec<_> = stream.buffer_unordered(concurrency_limit).collect().await;
+
             // flatten Option<User>
             let mut out = Vec::new();
             for r in results {

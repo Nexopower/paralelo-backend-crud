@@ -15,6 +15,9 @@ pub struct Settings {
     pub db: DbSettings,
     pub port: u16,
     pub jwt_secret: String,
+    pub concurrency_limit: usize,
+    pub db_query_timeout_secs: u64,
+    pub fail_fast: bool,
 }
 
 impl Settings {
@@ -29,7 +32,10 @@ impl Settings {
         };
         let port = env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8080);
         let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| "secret123".into());
-        Settings { db, port, jwt_secret }
+        let concurrency_limit = env::var("CONCURRENCY_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(20usize);
+        let db_query_timeout_secs = env::var("DB_QUERY_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(5u64);
+        let fail_fast = env::var("FAIL_FAST").ok().map(|s| matches!(s.as_str(), "1" | "true" | "True" | "yes")).unwrap_or(false);
+        Settings { db, port, jwt_secret, concurrency_limit, db_query_timeout_secs, fail_fast }
     }
 }
 
