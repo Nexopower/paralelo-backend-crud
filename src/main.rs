@@ -1,28 +1,43 @@
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+mod config;
+mod models;
+mod db;
+mod auth;
+mod token;
+mod handlers;
 
-#[get("/")]
-async fn hello() -> impl Responder {
-    HttpResponse::Ok().body("Hello world!")
-}
-
-#[post("/echo")]
-async fn echo(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
-}
-
-async fn manual_hello() -> impl Responder {
-    HttpResponse::Ok().body("Hey there!")
-}
+use actix_web::{web, App, HttpServer};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
+    let settings = config::Settings::from_env();
+    println!("Using DB host: {:?}", settings.db.host);
+
+    let pool = match db::init_db(&settings).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to init db: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let data_pool = web::Data::new(pool);
+    let data_cfg = web::Data::new(settings.clone());
+
+    let bind_addr = format!("0.0.0.0:{}", settings.port);
+
+    HttpServer::new(move || {
         App::new()
-            .service(hello)
-            .service(echo)
-            .route("/hey", web::get().to(manual_hello))
+            .app_data(data_pool.clone())
+            .app_data(data_cfg.clone())
+            .route("/login", web::post().to(handlers::login))
+            .route("/users", web::post().to(handlers::create_user))
+            .route("/users", web::get().to(handlers::list_users))
+            .route("/users/{id}", web::get().to(handlers::get_user))
+            .route("/users/{id}", web::put().to(handlers::update_user))
+            .route("/users/{id}", web::delete().to(handlers::delete_user))
+            .route("/load_concurrent", web::get().to(handlers::load_concurrent))
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(&bind_addr)?
     .run()
     .await
 }
