@@ -2,6 +2,7 @@ use crate::models::{CreateUser, UpdateUser, User};
 use sqlx::{Pool, Mssql, mssql::MssqlPoolOptions, Transaction, Row};
 use bcrypt::{hash, DEFAULT_COST};
 use anyhow::Result;
+use std::time::Duration;
 
 pub async fn init_db(settings: &crate::config::Settings) -> Result<Pool<Mssql>> {
     // Build connection string for MSSQL
@@ -10,9 +11,20 @@ pub async fn init_db(settings: &crate::config::Settings) -> Result<Pool<Mssql>> 
     let host = settings.db.host.clone().unwrap_or_else(|| "127.0.0.1".into());
     let port = settings.db.port;
     let database = settings.db.database.clone().unwrap_or_default();
-    let conn = format!("mssql://{}:{}@{}:{}/{}", user, password, host, port, database);
+    let encrypt = if settings.db.encrypt { "true" } else { "false" };
+    let trust = if settings.db.trust_server_certificate { "true" } else { "false" };
+    // Build DSN with configurable flags
+    let conn = format!(
+        "mssql://{}:{}@{}:{}/{}?encrypt={}&trustservercertificate={}",
+        user, password, host, port, database, encrypt, trust
+    );
 
-            let pool = MssqlPoolOptions::new().connect(&conn).await?;
+            let pool = MssqlPoolOptions::new()
+                .min_connections(settings.db.min_connections)
+                .max_connections(settings.db.max_connections)
+                .acquire_timeout(Duration::from_secs(settings.db.acquire_timeout_secs))
+                .connect(&conn)
+                .await?;
 
             Ok(pool)
 }
